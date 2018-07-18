@@ -33,6 +33,7 @@ exclude_project_id = [
 				"IEAB2Y3UI4HGW7VF"
 								]
 
+#Base URL, to be used for http requests through the WRIKE API
 BASE_URL = "https://www.wrike.com/api/v3/"
 
 
@@ -48,10 +49,12 @@ user_url = BASE_URL + "/contacts"
 response_users = requests.get(user_url, headers=headers)
 	# params={'fields':folder_fields})
 
-data_users = response_users.json()
 
+#Render JSON into dict and turn this into a dataFrame called df_users
+data_users = response_users.json()
 df_users =  pd.DataFrame.from_dict(data_users['data'])
 
+#Grab relevant columns from df_users
 df_users = df_users[['id','firstName','lastName']]
 df_users = df_users.rename(index=str, columns={'id': "user_id"})
 
@@ -67,39 +70,42 @@ df_users = df_users.rename(index=str, columns={'id': "user_id"})
 folder_url = BASE_URL + "folders/"
 folder_fields = str(['customFields','customColumnIds'])
 
+
 response_folders = requests.get(folder_url, headers=headers, 
 	params={'fields':folder_fields})
 
+#Get JSON data from http request
 data_folders = response_folders.json()
 
+#Collect relevant data from JSON and consolidate it into a dataFrame
 df_folders = pd.DataFrame.from_dict(data_folders['data'])
 df_folders = df_folders[['id','title','childIds']]
 
-
+#Create series containing all Child Ids
 s = df_folders.apply(lambda x: pd.Series(x['childIds']),axis=1).stack().reset_index(level=1, drop=True)
 s.name = 'childIds'
+
+#replace df childIds column with series version, this way, instead of having a list of child ids, each has its own entry in the df
 df_folders = df_folders.drop('childIds', axis=1).join(s)
+
+#merge the df with itself so as to gain better visibility child ID hierarchy
 df_folders = df_folders.merge(df_folders, left_on='childIds', right_on='id', how='left')
 df_folders = df_folders.merge(df_folders, left_on='childIds_y', right_on='id_x', how='inner')
 
+#rename df columns to accurately reflect data represented post merges
 df_folders = df_folders.rename(index=str, 
 	columns={'id_x_x':'pillar_id', 'title_x_x':'pillar_title', 'childIds_x_x':'pillar_childIds', 
 	'id_y_x':'project_id', 'title_y_x':'project_title','childIds_y_x':'project_childIds', 
 	'id_x_y':'job_id',
 	'title_x_y':'job_title', 'childIds_x_y':'job_childIds'})
 
+#add all DA&G information from df_folder to da_g_folder
 da_g_folder = df_folders[df_folders['pillar_id'] == da_g_pillar_id]
-# da_g_folder = da_g_folder[da_g_folder.job_title.str.startswith(('2'))]
-
-
 df_folders = df_folders[df_folders['pillar_id'].isin(pillars)]
 df_folders = df_folders[~df_folders['project_id'].isin(exclude_project_id)]
 
-
 # Get DA&G Folder Structure Separately
 # We want to avoid Double Counting
-
-
 
 #########################
 #########################
@@ -125,6 +131,9 @@ status_list = {
 		'IEAB2Y3UJMALYQFV': 'Rejected'
 		}
 
+#For every pillarin pillars, create a df containing all tasks
+#Then append this df to appended_data
+
 for pillar in pillars:
 	task_url = BASE_URL + "folders/" + pillar + "/tasks" 
 
@@ -138,6 +147,8 @@ for pillar in pillars:
 	
 	appended_data.append(temp_df)
 
+#At this point apppended data is a list of dfs containing task data
+#Concatenate list of dfs together into one df named df_tasks
 df_tasks = pd.concat(appended_data, ignore_index=True )
 
 #########################
@@ -160,18 +171,23 @@ df_da_g = pd.DataFrame.from_dict(da_g_tasks['data'])
 
 df_da_g = df_da_g[['id','title','parentIds','superParentIds','customStatusId','responsibleIds']]
 
-s = df_da_g.apply(lambda x: pd.Series(x['parentIds']),axis=1).stack().reset_index(level=1, drop=True)
-s.name = 'parentIds'
-df_da_g = df_da_g.drop('parentIds', axis=1).join(s)
+#precondition:
+#non-empty df containing a column of lists
+#postconidtion:
+#returns copy of orignial df where column of lists has been unraveled in the df. 
+#i.e. column now contains individual entries of the same data type.
 
-s = df_da_g.apply(lambda x: pd.Series(x['superParentIds']),axis=1).stack().reset_index(level=1, drop=True)
-s.name = 'superParentIds'
-df_da_g = df_da_g.drop('superParentIds', axis=1).join(s)
+def unravel_col_lists(df, column_name):
+	s = df.apply(lambda x:pd.Series(x[column_name]), axis=1).stack().reset_index(level=1,drop=True)
+	s.name = column_name
+	df = df.drop(column_name, axis=1).join(s)
+	return df
 
-s = df_da_g.apply(lambda x: pd.Series(x['responsibleIds']),axis=1).stack().reset_index(level=1, drop=True)
-s.name = 'responsibleIds'
-df_da_g = df_da_g.drop('responsibleIds', axis=1).join(s)
+#extract data from lists within columns for various ids
 
+df_da_g =  unravel_col_lists(df_da_g, 'parentIds')
+df_da_g = unravel_col_lists(df_da_g, 'superParentIds')
+df_da_g = unravel_col_lists(df_da_g, 'responsibleIds')
 
 def replace_parentid(df):
 	if df['parentIds'] == 'IEAB2Y3UI7777777':
@@ -182,25 +198,18 @@ def replace_parentid(df):
 def current_status(df):
 	return status_list[df['customStatusId']]
 
+
 df_da_g['parentIds'] = df_da_g.apply(replace_parentid, axis=1)
 df_da_g = df_da_g.drop_duplicates()
 df_da_g['Current_status'] = df_da_g.apply(current_status, axis=1)
 
-
-
 df_tasks = df_tasks[['id','title','parentIds','superParentIds','customStatusId','responsibleIds']]
 
-s = df_tasks.apply(lambda x: pd.Series(x['parentIds']),axis=1).stack().reset_index(level=1, drop=True)
-s.name = 'parentIds'
-df_tasks = df_tasks.drop('parentIds', axis=1).join(s)
+#extract data from lists within columns for various ids
 
-s = df_tasks.apply(lambda x: pd.Series(x['superParentIds']),axis=1).stack().reset_index(level=1, drop=True)
-s.name = 'superParentIds'
-df_tasks = df_tasks.drop('superParentIds', axis=1).join(s)
-
-s = df_tasks.apply(lambda x: pd.Series(x['responsibleIds']),axis=1).stack().reset_index(level=1, drop=True)
-s.name = 'responsibleIds'
-df_tasks = df_tasks.drop('responsibleIds', axis=1).join(s)
+df_tasks = unravel_col_lists(df_tasks, 'parentIds')
+df_tasks = unravel_col_lists(df_tasks, 'superParentIds')
+df_tasks = unravel_col_lists(df_tasks, 'responsibleIds')
 
 df_tasks['parentIds'] = df_tasks.apply(replace_parentid, axis=1)
 df_tasks = df_tasks.drop_duplicates()
@@ -221,14 +230,12 @@ data_workflow = response_workflow.json()
 
 workflow_df = pd.DataFrame.from_dict(data_workflow['data'])
 
-# workflow_df.to_csv('workflow.csv', index=False)
-
-
 #########################
 #########################
 ######## Combine ########
 #########################
 #########################
+
 df_da_g_all  = da_g_folder.merge(df_da_g, left_on='job_id', right_on='parentIds', how='inner')
 df_all = df_folders.merge(df_tasks, left_on='job_id', right_on='parentIds', how='inner')
 df_all = pd.concat([df_all,df_da_g_all])
@@ -242,19 +249,8 @@ df_all.to_csv('all.csv', index=False)
 
 #########################
 #########################
-# #Task for every Pillars
+###  FINAL DATAFRAME  ###
 #########################
 #########################
-
 
 L1 = df_all[['pillar_title','project_title', 'id', 'Current_status','full_name']]
-# L1 = L1.groupby(['pillar_title']).count().reset_index(level=0)
-
-L2 = df_all[['pillar_title','project_title', 'id', 'Current_status']]
-# L2 = L1.groupby(['pillar_title']).count().reset_index(level=0)
-
-x_data = L1['pillar_title'].tolist()
-y_data = L1['id'].tolist()
-
-
-
